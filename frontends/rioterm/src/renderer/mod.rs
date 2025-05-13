@@ -20,8 +20,8 @@ use rio_backend::config::Config;
 use rio_backend::crosswords::TermDamage;
 use rio_backend::event::EventProxy;
 use rio_backend::sugarloaf::{
-    Content, DrawableChar, FragmentStyle, FragmentStyleDecoration, Graphic, Stretch,
-    Style, SugarCursor, Sugarloaf, UnderlineInfo, UnderlineShape, Weight,
+    drawable_character, Content, FragmentStyle, FragmentStyleDecoration, Graphic,
+    Stretch, Style, SugarCursor, Sugarloaf, UnderlineInfo, UnderlineShape, Weight,
 };
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -43,6 +43,7 @@ pub struct Renderer {
     pub colors: List,
     pub navigation: ScreenNavigation,
     unfocused_split_opacity: f32,
+    last_active: usize,
     pub config_has_blinking_enabled: bool,
     pub config_blinking_interval: u64,
     ignore_selection_fg_color: bool,
@@ -91,6 +92,7 @@ impl Renderer {
 
         Renderer {
             unfocused_split_opacity: config.navigation.unfocused_split_opacity,
+            last_active: 0,
             use_drawable_chars: config.fonts.use_drawable_chars,
             draw_bold_text_with_light_colors: config.draw_bold_text_with_light_colors,
             macos_use_unified_titlebar: config.window.macos_use_unified_titlebar,
@@ -349,43 +351,22 @@ impl Renderer {
             // TODO: In the future it should use same logic to render everything
             // at once.
             if self.use_drawable_chars {
-                match square_content {
-                    '\u{2500}'..='\u{259f}'
-                    | '\u{1fb00}'..='\u{1fb3b}'
-                    // Powerlines
-                    | '\u{e0b0}'..='\u{e0bf}'
-                    // Brailles
-                    | '\u{2800}'..='\u{28FF}'
-                    // Sextants
-                    | '\u{1FB00}'..='\u{1FB3F}'
-                    // Octants
-                    | '\u{1CD00}'..='\u{1CDE5}'  => {
-                        if let Ok(character) = DrawableChar::try_from(square_content) {
-                            style.drawable_char = Some(character);
-                            if !content.is_empty() {
-                                if let Some(line) = line_opt {
-                                    builder.add_text_on_line(line, &content, last_style);
-                                } else {
-                                    builder.add_text(&content, last_style);
-                                }
-                                content.clear();
-                            }
-
-                            last_style = style;
-
-                            // Ignore font shaping
-                            content.push(' ');
+                if let Some(character) = drawable_character(square_content) {
+                    style.drawable_char = Some(character);
+                    if !content.is_empty() {
+                        if let Some(line) = line_opt {
+                            builder.add_text_on_line(line, &content, last_style);
                         } else {
-                            // Used solely for debugging purposes:
-                            // panic!("Could not find {:?}", square_content);
-                            tracing::warn!(
-                                "use_drawable_chars: Could not find {:?} on sugarloaf",
-                                square_content
-                            );
+                            builder.add_text(&content, last_style);
                         }
+                        content.clear();
                     }
-                    _ => {}
-                };
+
+                    last_style = style;
+
+                    // Ignore font shaping
+                    content.push(' ');
+                }
             }
 
             let has_drawable_char = style.drawable_char.is_some();
@@ -775,6 +756,12 @@ impl Renderer {
 
         let grid = context_manager.current_grid_mut();
         let active_index = grid.current;
+        let mut has_active_changed = false;
+        if self.last_active != active_index {
+            has_active_changed = true;
+
+            self.last_active = active_index;
+        }
 
         for (index, grid_context) in grid.contexts_mut().iter_mut().enumerate() {
             let is_active = active_index == index;
@@ -798,7 +785,8 @@ impl Renderer {
             // let duration = start.elapsed();
             // println!("Time elapsed in antes is: {:?}", duration);
             // let renderable_content = context.renderable_content();
-            let force_full_damage = context.renderable_content.has_pending_updates
+            let force_full_damage = has_active_changed
+                || context.renderable_content.has_pending_updates
                 || is_active
                     && (context.renderable_content.selection_range.is_some()
                         || hints.is_some());
@@ -836,6 +824,16 @@ impl Renderer {
                 terminal.reset_damage();
                 result
             };
+
+            // If the last line is bigger than the actual visible rows, then some resize
+            // has happened. In this case, request full draw.
+            if let Some(ref lines) = specific_lines {
+                if let Some(max_value) = lines.iter().max() {
+                    if max_value > &(visible_rows.len() - 1) {
+                        specific_lines = None;
+                    }
+                }
+            }
 
             // let duration = start.elapsed();
             // println!("Time elapsed in antes-antes is: {:?}", duration);
@@ -909,18 +907,20 @@ impl Renderer {
                         let has_cursor = is_cursor_visible
                             && context.renderable_content.cursor.state.pos.row == line;
                         content.clear_line(line);
-                        self.create_line(
-                            content,
-                            &visible_rows[line],
-                            has_cursor,
-                            Some(line),
-                            Line(line as i32),
-                            &context.renderable_content,
-                            hints,
-                            focused_match,
-                            &colors,
-                            is_active,
-                        );
+                        if let Some(visible_row) = visible_rows.get(line) {
+                            self.create_line(
+                                content,
+                                visible_row,
+                                has_cursor,
+                                Some(line),
+                                Line(line as i32),
+                                &context.renderable_content,
+                                hints,
+                                focused_match,
+                                &colors,
+                                is_active,
+                            );
+                        }
                     }
                 }
             };

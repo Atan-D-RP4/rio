@@ -5,7 +5,20 @@ language: 'en'
 
 # Releases
 
-## 0.2.13 (unreleased)
+## 0.2.16 (unreleased)
+
+- TBD.
+
+## 0.2.15
+
+- Fix: In some cases, the first typed character doesn't display until after a delay, or until another key is hit [#1098](https://github.com/raphamorim/rio/issues/1098).
+- Fix: Anomalous behavior occurs with the Bookmark tab style in the new versions 0.14 and 0.13. [#1094](https://github.com/raphamorim/rio/issues/1094).
+
+## 0.2.14
+
+- Fix: panic and crash of terminal window during sudo apt update [#1093](https://github.com/raphamorim/rio/issues/1093).
+
+## 0.2.13
 
 - *Breaking change*: For Windows and Linux users, hyperlink trigger whenever hovering a link was changed from `alt` to `shift`.
 - Fix dimension for whenever a new tab is created from a view with splits.
@@ -31,6 +44,9 @@ language: 'en'
 - Support for setting a custom config directory using `$RIO_CONFIG_HOME`
 - Support for additional font dirs using `fonts.additional-dirs`
 - Rio's MSRV is 1.85.0.
+- Support to Sextants.
+- Fix: Octant support [#814](https://github.com/raphamorim/rio/issues/814).
+- Fix: Issue regarding split not updating opacity style when getting unfocused.
 - Add support for custom parsing of APC, SOS and PM sequences.
 
 ## 0.2.12

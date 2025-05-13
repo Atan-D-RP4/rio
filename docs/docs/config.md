@@ -402,14 +402,14 @@ fonts.use-drawable-chars = true
 - `╦` - DoubleHorizontalDown
 - `╩` - DoubleHorizontalUp
 - `╫` - VerticalDoubleAndHorizontalSingle
-- `╒` - DownDoubleAndRightSingle
-- `╕` - DownDoubleAndLeftSingle
-- `╞` - VerticalDoubleAndRightSingle
-- `╡` - VerticalDoubleAndLeftSingle
-- `╟` - VerticalSingleAndRightDouble
-- `╢` - VerticalSingleAndLeftDouble
-- `╓` - DownSingleAndRightDouble
-- `╖` - DownSingleAndLeftDouble
+- `╓` - DownDoubleAndRightSingle
+- `╖` - DownDoubleAndLeftSingle
+- `╟` - VerticalDoubleAndRightSingle
+- `╢` - VerticalDoubleAndLeftSingle
+- `╞` - VerticalSingleAndRightDouble
+- `╡` - VerticalSingleAndLeftDouble
+- `╒` - DownSingleAndRightDouble
+- `╕` - DownSingleAndLeftDouble
 - `┏` - HeavyDownAndRight
 - `┓` - HeavyDownAndLeft
 - `┗` - HeavyUpAndRight
@@ -453,20 +453,6 @@ fonts.use-drawable-chars = true
 - `╱` - DiagonalRisingBar
 - `╲` - DiagonalFallingBar
 - `╳` - DiagonalCross
-- `■` - BlackSquare
-- `□` - WhiteSquare
-- `●` - BlackCircle
-- `○` - WhiteCircle
-- `▲` - BlackUpPointingTriangle
-- `△` - WhiteUpPointingTriangle
-- `▶` - BlackRightPointingTriangle
-- `▷` - WhiteRightPointingTriangle
-- `▼` - BlackDownPointingTriangle
-- `▽` - WhiteDownPointingTriangle
-- `◀` - BlackLeftPointingTriangle
-- `◁` - WhiteLeftPointingTriangle
-- `◆` - BlackDiamond
-- `◇` - WhiteDiamond
 - `` PowerlineLeftSolid
 - `` PowerlineRightSolid
 - `` PowerlineLeftHollow
@@ -738,6 +724,8 @@ fonts.use-drawable-chars = true
 - `⣻` BrailleDots1245678
 - `⣹` BrailleDots145678
 - `⣺` BrailleDots245678
+- Sextants characters
+- Octants characters
 </p>
 </details>
 
