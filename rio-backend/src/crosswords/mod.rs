@@ -2997,6 +2997,16 @@ impl<U: EventListener> Handler for Crosswords<U> {
         self.event_proxy
             .send_event(RioEvent::PtyWrite(response), self.window_id);
     }
+
+    fn apc_response(&mut self, response: String) {
+        tracing::info!(
+            "APC response being sent: {:?} (as bytes: {:?})",
+            response,
+            response.as_bytes()
+        );
+        self.event_proxy
+            .send_event(RioEvent::PtyWrite(response), self.window_id);
+    }
 }
 
 pub struct CrosswordsSize {

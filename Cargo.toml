@@ -8,6 +8,7 @@ members = [
     "rio-backend",
     "rio-window",
     "frontends/rioterm",
+    "frontends/wasm",
 ]
 resolver = "2"
 

@@ -470,7 +470,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             }
             0x1B => {
                 // Start of ST termination (\x1b\)
-                self.action_apc_put(performer, byte);
+                // Don't include the ESC byte in the payload - it's part of the terminator
                 self.action_apc_dispatch(performer, false);
                 self.osc_raw.clear();
                 self.osc_num_params = 0;
@@ -527,7 +527,12 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         // Skip the 'G' character in the first parameter
         let first_param = {
             let indices = self.osc_params[0];
-            &self.osc_raw[indices.0..indices.1] // Skip 'G'
+            // Start from index 1 to skip the 'G' command marker
+            if indices.0 < indices.1 {
+                &self.osc_raw[indices.0 + 1..indices.1]
+            } else {
+                &self.osc_raw[indices.0..indices.1]
+            }
         };
 
         let params = if self.osc_num_params > 0 {
@@ -1853,7 +1858,6 @@ mod tests {
             Sequence::OpaquePut(OpaqueSequenceKind::Apc, b'm'),
             Sequence::OpaquePut(OpaqueSequenceKind::Apc, b'9'),
             Sequence::OpaquePut(OpaqueSequenceKind::Apc, b'v'),
-            Sequence::OpaquePut(OpaqueSequenceKind::Apc, b'\x1b'),
             Sequence::OpaqueEnd(OpaqueSequenceKind::Apc),
             Sequence::Esc(vec![], false, b'\\'),
         ];

@@ -398,6 +398,9 @@ pub trait Handler {
 
     /// Handle XTGETTCAP response.
     fn xtgettcap_response(&mut self, _response: String) {}
+
+    /// Handle APC (Application Program Command) response.
+    fn apc_response(&mut self, _response: String) {}
 }
 
 pub trait Timeout: Default {
@@ -546,7 +549,7 @@ impl<T: Timeout> Processor<T> {
         H: Handler,
     {
         // Process all synchronized bytes.
-        //
+
         // NOTE: We do not use `advance_until_terminated` here since BSU sequences are
         // processed automatically during the synchronized update.
         let buffer = mem::take(&mut self.state.sync_state.buffer);
@@ -559,7 +562,7 @@ impl<T: Timeout> Processor<T> {
 
         match bsu_offset {
             // Just clear processed bytes if there is a new BSU.
-            //
+
             // NOTE: We do not need to re-process for a new ESU since the `advance_sync`
             // function checks for BSUs in reverse.
             Some(bsu_offset) => {
@@ -617,7 +620,7 @@ impl<T: Timeout> Processor<T> {
         let search_buffer = &self.state.sync_state.buffer[start_offset..end_offset];
 
         // Search for termination/extension escapes in the added bytes.
-        //
+
         // NOTE: It is technically legal to specify multiple private modes in the same
         // escape, but we only allow EXACTLY `\e[?2026h`/`\e[?2026l` to keep the parser
         // more simple.
@@ -733,7 +736,20 @@ impl<U: Handler, T: Timeout> copa::Perform for Performer<'_, U, T> {
     }
 
     fn apc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        warn!("[apc_dispatch] params={params:?} bell_terminated={bell_terminated}");
+        // Debug: Print actual parameter bytes to see what's being received
+        tracing::info!(
+            "[apc_dispatch] received {} params, bell_terminated={}",
+            params.len(),
+            bell_terminated
+        );
+        for (i, param) in params.iter().enumerate() {
+            tracing::info!(
+                "[apc_dispatch] param[{}]: {:?}",
+                i,
+                String::from_utf8_lossy(param)
+            );
+        }
+
         let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
 
         fn unhandled(params: &[&[u8]]) {
@@ -745,20 +761,80 @@ impl<U: Handler, T: Timeout> copa::Perform for Performer<'_, U, T> {
                 }
                 buf.push_str("],");
             }
-            warn!("[unhandled osc_dispatch]: [{}] at line {}", &buf, line!());
+            warn!(
+                "[unhandled osc_dispatch]: [{}] at line {}",
+                &buf.trim_end_matches(','),
+                line!()
+            );
         }
 
         if params.is_empty() || params[0].is_empty() {
+            tracing::warn!("[apc_dispatch] empty params, ignoring");
             return;
         }
 
         match params[0] {
             b"G" => {
-                // Write handler for kitty graphics
-                kitty_graphics_protocol::parse(params);
-                todo!();
+                tracing::info!("[apc_dispatch] Matched Kitty graphics protocol 'G'");
+
+                // Handle queries and send responses first
+                // Pass correct terminator to use in response
+                if let Some(response) =
+                    kitty_graphics_protocol::handle_query(params, terminator)
+                {
+                    tracing::info!(
+                        "[apc_dispatch] Sending graphics query response: {:?}",
+                        response
+                    );
+                    self.handler.apc_response(response);
+                }
+
+                // Handle Kitty graphics protocol
+                // For Kitty graphics, copa splits parameters on semicolons, but Kitty uses
+                // semicolons for payload separation. We need to reconstruct the full APC data.
+                let full_apc_data = if params.len() == 1 {
+                    // Single parameter case - should be just "G" but copa processing gives us more
+                    params[0].to_vec()
+                } else {
+                    // Multiple parameters - reconstruct by joining all params with semicolons
+                    // The first param should start with 'G' after copa processing
+                    let mut reconstructed = Vec::new();
+                    for (i, param) in params.iter().enumerate() {
+                        if i > 0 {
+                            reconstructed.extend_from_slice(b";");
+                        }
+                        reconstructed.extend_from_slice(param);
+                    }
+                    let apc_str = String::from_utf8_lossy(&reconstructed);
+                    let truncated = if apc_str.len() > 50 {
+                        format!("{}...({} chars)", &apc_str[..50], apc_str.len())
+                    } else {
+                        apc_str.to_string()
+                    };
+                    tracing::debug!(
+                        "[apc_dispatch] Reconstructed APC data: {}",
+                        truncated
+                    );
+                    reconstructed
+                };
+
+                let single_param = [full_apc_data.as_slice()];
+                if let Some(graphic_data) = kitty_graphics_protocol::parse(&single_param)
+                {
+                    tracing::info!(
+                        "[apc_dispatch] Received graphic data: {:?}",
+                        graphic_data.id
+                    );
+                    self.handler.insert_graphic(graphic_data, None);
+                }
             }
-            _ => unhandled(params),
+            _ => {
+                tracing::warn!(
+                    "[apc_dispatch] Unrecognized APC command: {:?}",
+                    String::from_utf8_lossy(params[0])
+                );
+                unhandled(params);
+            }
         }
     }
 
