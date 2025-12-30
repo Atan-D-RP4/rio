@@ -237,6 +237,8 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
                     &Cow::Borrowed(&config.shell.program),
                     cols,
                     rows,
+                    dimension.width as u16,
+                    dimension.height as u16,
                 ) {
                     Ok(created_pty) => created_pty,
                     Err(err) => {
@@ -252,6 +254,8 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
                     &config.working_dir,
                     cols,
                     rows,
+                    dimension.width as u16,
+                    dimension.height as u16,
                 ) {
                     Ok(created_pty) => created_pty,
                     Err(err) => {

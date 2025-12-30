@@ -1190,42 +1190,29 @@ pub fn handle_query(params: &[&[u8]], terminator: &str) -> Option<String> {
     }
 
     // Check if this looks like a Kitty graphics query by examining all parameters
-    // kitten icat sends queries like: \e_G a=q,q=1,i=1\e\\
-    // But copa splits this into parameters, so we need to check across all params
+    // kitten icat sends queries like: a=q,f=24,s=1,v=1,S=3,i=1;payload
+    // The i= parameter is the image ID used for the response
 
     let mut has_query_action = false;
-    let mut query_id = 1;
-    let mut image_id = 0;
+    let mut image_id: u32 = 0;
 
-    for (i, param) in params.iter().enumerate() {
+    for (idx, param) in params.iter().enumerate() {
         let param_str = std::str::from_utf8(param).ok()?;
-        tracing::debug!("handle_query param[{}]: {}", i, param_str);
+        tracing::debug!("handle_query param[{}]: {}", idx, param_str);
 
-        // Check for query action
-        if param_str.contains("a=q") {
-            has_query_action = true;
-            tracing::debug!("Found a=q in param[{}]", i);
-        }
+        // Split off any payload after ';'
+        let control_part = param_str.split(';').next().unwrap_or(param_str);
 
-        // Extract query_id and image_id from any parameter
-        for part in param_str.split(',') {
-            if let Some(q) = part.strip_prefix("q=") {
-                if let Ok(id) = q.parse::<u32>() {
-                    query_id = id;
-                    tracing::debug!("Found query_id: {}", id);
-                }
+        // Check for query action and extract image_id
+        for part in control_part.split(',') {
+            if part == "a=q" {
+                has_query_action = true;
+                tracing::debug!("Found a=q in param[{}]", idx);
             }
             if let Some(i) = part.strip_prefix("i=") {
                 if let Ok(id) = i.parse::<u32>() {
                     image_id = id;
                     tracing::debug!("Found image_id: {}", id);
-                }
-            }
-            // Handle case where i= is prefixed with G (like "Gi=1")
-            if let Some(i) = part.strip_prefix("Gi=") {
-                if let Ok(id) = i.parse::<u32>() {
-                    image_id = id;
-                    tracing::debug!("Found image_id from Gi=: {}", id);
                 }
             }
         }
@@ -1237,16 +1224,13 @@ pub fn handle_query(params: &[&[u8]], terminator: &str) -> Option<String> {
     }
 
     tracing::info!(
-        "Detected Kitty graphics query: id={}, image_id={}",
-        query_id,
+        "Detected Kitty graphics query: image_id={}",
         image_id
     );
 
-    // Return positive response for graphics protocol support
-    // Response format: ESC_G i=ID,a=v,q=ID;OK <terminator>
-    // where i matches query's image ID, a=v (verify action), q=ID matches the query ID
-    // Use the same terminator as the original query (BEL or ST)
-    let response = format!("\x1b_Gi={},a=v,q={};OK{}", image_id, query_id, terminator);
+    // Response format: ESC_G i=ID;OK <terminator>
+    // The i= value must match what was sent in the query
+    let response = format!("\x1b_Gi={};OK{}", image_id, terminator);
 
     tracing::info!("Query response: {}", response);
 
@@ -1495,7 +1479,145 @@ pub fn parse(params: &[&[u8]], state: &mut KittyImageState) -> Option<GraphicDat
 
                     Some(graphic_data)
                 }
-                // Handle other data types (file, temporary file, shared memory)
+                KittyImageData::SharedMem {
+                    name,
+                    data_size,
+                    data_offset,
+                } => {
+                    tracing::info!(
+                        "Reading Kitty image from shared memory: {}, size={:?}, offset={:?}",
+                        name,
+                        data_size,
+                        data_offset
+                    );
+
+                    let shm_path = format!("/dev/shm/{}", name);
+                    let image_bytes = match std::fs::read(&shm_path) {
+                        Ok(mut bytes) => {
+                            let offset = data_offset.unwrap_or(0) as usize;
+                            if offset > 0 && offset < bytes.len() {
+                                bytes = bytes[offset..].to_vec();
+                            }
+                            if let Some(size) = data_size {
+                                let size = size as usize;
+                                if size < bytes.len() {
+                                    bytes.truncate(size);
+                                }
+                            }
+                            let _ = std::fs::remove_file(&shm_path);
+                            bytes
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to read shared memory {}: {:?}", shm_path, e);
+                            return None;
+                        }
+                    };
+
+                    tracing::info!(
+                        "Read {} bytes from shared memory, format={:?}, width={:?}, height={:?}",
+                        image_bytes.len(),
+                        transmit.format,
+                        transmit.width,
+                        transmit.height
+                    );
+
+                    let dynamic_image = match transmit.format {
+                        Some(KittyImageFormat::Rgb) => {
+                            let width = transmit.width.unwrap_or(0);
+                            let height = transmit.height.unwrap_or(0);
+                            if width == 0 || height == 0 {
+                                tracing::warn!("Raw RGB data requires width and height");
+                                return None;
+                            }
+                            image_rs::RgbImage::from_raw(width, height, image_bytes)
+                                .map(image_rs::DynamicImage::ImageRgb8)
+                        }
+                        Some(KittyImageFormat::Rgba) => {
+                            let width = transmit.width.unwrap_or(0);
+                            let height = transmit.height.unwrap_or(0);
+                            if width == 0 || height == 0 {
+                                tracing::warn!("Raw RGBA data requires width and height");
+                                return None;
+                            }
+                            image_rs::RgbaImage::from_raw(width, height, image_bytes)
+                                .map(image_rs::DynamicImage::ImageRgba8)
+                        }
+                        Some(KittyImageFormat::Png) | None => {
+                            image_rs::load_from_memory(&image_bytes).ok()
+                        }
+                    };
+
+                    let dynamic_image = match dynamic_image {
+                        Some(img) => img,
+                        None => {
+                            tracing::warn!("Failed to create image from shared memory data");
+                            return None;
+                        }
+                    };
+
+                    let graphic_data =
+                        GraphicData::from_dynamic_image(GraphicId(0), dynamic_image);
+
+                    Some(graphic_data)
+                }
+                KittyImageData::TemporaryFile {
+                    path,
+                    data_size,
+                    data_offset,
+                } => {
+                    tracing::info!(
+                        "Reading Kitty image from temp file: {}, size={:?}, offset={:?}",
+                        path,
+                        data_size,
+                        data_offset
+                    );
+
+                    let image_bytes = match std::fs::read(&path) {
+                        Ok(mut bytes) => {
+                            let offset = data_offset.unwrap_or(0) as usize;
+                            if offset > 0 && offset < bytes.len() {
+                                bytes = bytes[offset..].to_vec();
+                            }
+                            if let Some(size) = data_size {
+                                let size = size as usize;
+                                if size < bytes.len() {
+                                    bytes.truncate(size);
+                                }
+                            }
+                            let _ = std::fs::remove_file(&path);
+                            bytes
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to read temp file {}: {:?}", path, e);
+                            return None;
+                        }
+                    };
+
+                    tracing::info!("Read {} bytes from temp file", image_bytes.len());
+
+                    let dynamic_image = image_rs::load_from_memory(&image_bytes)
+                        .map_err(|e| {
+                            tracing::warn!("Failed to load image from temp file: {:?}", e);
+                            e
+                        })
+                        .ok()?;
+
+                    let mut graphic_data =
+                        GraphicData::from_dynamic_image(GraphicId(0), dynamic_image);
+
+                    let resize_width = transmit.width.map(ResizeParameter::Pixels);
+                    let resize_height = transmit.height.map(ResizeParameter::Pixels);
+
+                    if resize_width.is_some() || resize_height.is_some() {
+                        graphic_data.resize = Some(ResizeCommand {
+                            width: resize_width.unwrap_or(ResizeParameter::Auto),
+                            height: resize_height.unwrap_or(ResizeParameter::Auto),
+                            preserve_aspect_ratio: true,
+                        });
+                    }
+
+                    Some(graphic_data)
+                }
                 _ => {
                     tracing::warn!("Unsupported Kitty image data type");
                     None
