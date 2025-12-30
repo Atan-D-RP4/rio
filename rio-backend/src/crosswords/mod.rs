@@ -2993,19 +2993,16 @@ impl<U: EventListener> Handler for Crosswords<U> {
     }
 
     #[inline]
-    fn xtgettcap_response(&mut self, response: String) {
+    fn apc_response(&mut self, response: String) {
         self.event_proxy
             .send_event(RioEvent::PtyWrite(response), self.window_id);
     }
 
-    fn apc_response(&mut self, response: String) {
-        tracing::info!(
-            "APC response being sent: {:?} (as bytes: {:?})",
-            response,
-            response.as_bytes()
-        );
-        self.event_proxy
-            .send_event(RioEvent::PtyWrite(response), self.window_id);
+    #[inline]
+    fn kitty_graphics_state(
+        &mut self,
+    ) -> &mut crate::ansi::kitty_graphics_protocol::KittyImageState {
+        &mut self.graphics.kitty_state
     }
 }
 

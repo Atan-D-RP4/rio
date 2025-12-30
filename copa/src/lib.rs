@@ -476,18 +476,6 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.osc_num_params = 0;
                 self.state = State::Escape;
             }
-            0x2C | 0x3B => {
-                // Comma separates key-value pairs in control data
-                // Semicolon separate control data from payload
-                #[cfg(not(feature = "std"))]
-                {
-                    if self.osc_raw.is_full() {
-                        return;
-                    }
-                }
-                self.action_apc_put(performer, byte);
-                self.action_osc_put_param(); // Reuse existing method to track parameter boundaries
-            }
             0x20..=0xFF => {
                 // Collect valid APC content (control data or payload)
                 self.action_apc_put(performer, byte);
@@ -509,54 +497,16 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 
     #[inline]
     fn action_apc_dispatch<P: Perform>(&self, performer: &mut P, bell_terminated: bool) {
-        // Ensure the APC sequence starts with 'G'
-        if self.osc_raw.is_empty() || self.osc_raw[0] != b'G' {
-            performer.apc_end();
-            return;
-        }
-
-        // Parse control data and payload
-        let mut slices: [MaybeUninit<&[u8]>; MAX_OSC_PARAMS] =
-            unsafe { MaybeUninit::uninit().assume_init() };
-
-        for (i, slice) in slices.iter_mut().enumerate().take(self.osc_num_params) {
-            let indices = self.osc_params[i];
-            *slice = MaybeUninit::new(&self.osc_raw[indices.0..indices.1]);
-        }
-
-        // Skip the 'G' character in the first parameter
-        let first_param = {
-            let indices = self.osc_params[0];
-            // Start from index 1 to skip the 'G' command marker
-            if indices.0 < indices.1 {
-                &self.osc_raw[indices.0 + 1..indices.1]
-            } else {
-                &self.osc_raw[indices.0..indices.1]
-            }
-        };
-
-        let params = if self.osc_num_params > 0 {
-            let mut params = Vec::with_capacity(self.osc_num_params);
-            params.push(first_param);
-            for i in 1..self.osc_num_params {
-                let indices = self.osc_params[i];
-                let param = &self.osc_raw[indices.0..indices.1];
-                params.push(param);
-            }
-            let indices = self.osc_params.last().unwrap_or(&(0, 0));
-            params.push(&self.osc_raw[indices.1 + 1..]);
-            params
-        } else {
-            vec![first_param]
-        };
-
+        // Pass the raw APC string as a single parameter
+        // The handler is responsible for parsing it (e.g. splitting keys and payload)
+        let params = vec![self.osc_raw.as_slice()];
         unsafe {
             let params_ptr = params.as_slice() as *const [&[u8]];
             performer.apc_dispatch(&*params_ptr, bell_terminated);
         }
-
         performer.apc_end();
-    }
+        }
+
 
     #[inline(always)]
     fn advance_opaque_string<D: OpaqueDispatch>(&mut self, mut dispatcher: D, byte: u8) {

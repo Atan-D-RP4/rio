@@ -400,6 +400,8 @@ pub fn create_pty_with_spawn(
     working_directory: &Option<String>,
     columns: u16,
     rows: u16,
+    width_px: u16,
+    height_px: u16,
 ) -> Result<Pty, Error> {
     #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     let mut is_controling_terminal = true;

@@ -1030,6 +1030,148 @@ mod test {
             }
         );
     }
+
+    #[test]
+    fn test_handle_query_bell() {
+        let params = &[b"Gi=1,a=q,q=1".as_slice()];
+        let resp = handle_query(params, "\x07").expect("expected response");
+        assert_eq!(resp, "\x1b_Gi=1,a=v,q=1;OK\x07");
+    }
+
+    #[test]
+    fn test_handle_query_st() {
+        let params = &[b"Gi=1,a=q,q=1".as_slice()];
+        let resp = handle_query(params, "\x1b\\").expect("expected response");
+        assert_eq!(resp, "\x1b_Gi=1,a=v,q=1\x1b\\");
+    }
+
+    #[test]
+    fn test_handle_query_without_g_prefix() {
+        let params = &[b"i=1,a=q,q=1".as_slice()];
+        let resp = handle_query(params, "\x07").expect("expected response");
+        assert_eq!(resp, "\x1b_Gi=1,a=v,q=1;OK\x07");
+    }
+
+    #[test]
+    fn test_handle_query_no_action() {
+        let params = &[b"i=1,q=1".as_slice()];
+        let resp = handle_query(params, "\x07");
+        assert_eq!(resp, None);
+    }
+
+    #[test]
+    fn test_handle_query_empty_params() {
+        let params: &[&[u8]] = &[];
+        let resp = handle_query(params, "\x07");
+        assert_eq!(resp, None);
+    }
+
+    #[test]
+    fn test_chunk_accumulation_single_chunk() {
+        // Test single chunk (m=0) - should decode immediately
+        // This is a minimal valid 1x1 red PNG encoded as base64
+        let png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+        let apc_data = format!("Gf=100,i=1,m=0;{}", png_base64);
+
+        let mut state = KittyImageState::default();
+        let params = &[apc_data.as_bytes()];
+        let result = parse(params, &mut state);
+
+        assert!(
+            result.is_some(),
+            "Single chunk with m=0 should produce GraphicData"
+        );
+        let graphic = result.unwrap();
+        assert!(graphic.width > 0, "Decoded image should have width > 0");
+        assert!(graphic.height > 0, "Decoded image should have height > 0");
+    }
+
+    #[test]
+    fn test_chunk_accumulation_multi_chunk() {
+        // Test multi-chunk assembly: split base64 PNG across two chunks
+        // First chunk has m=1 (more follows), second has m=0 (final)
+        let png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+        // Split the base64 roughly in half
+        let split_point = png_base64.len() / 2;
+        let chunk1 = &png_base64[..split_point];
+        let chunk2 = &png_base64[split_point..];
+
+        let apc_chunk1 = format!("Gf=100,i=42,m=1;{}", chunk1);
+        let apc_chunk2 = format!("Gf=100,i=42,m=0;{}", chunk2);
+
+        let mut state = KittyImageState::default();
+
+        // First chunk: should return None and accumulate
+        let params1 = &[apc_chunk1.as_bytes()];
+        let result1 = parse(params1, &mut state);
+        assert!(result1.is_none(), "First chunk with m=1 should return None");
+        assert!(
+            state.chunk_accumulators.contains_key(&42),
+            "State should have accumulated data for image_id=42"
+        );
+
+        // Second chunk: should complete and return GraphicData
+        let params2 = &[apc_chunk2.as_bytes()];
+        let result2 = parse(params2, &mut state);
+        assert!(
+            result2.is_some(),
+            "Final chunk with m=0 should produce GraphicData"
+        );
+
+        let graphic = result2.unwrap();
+        assert!(graphic.width > 0, "Decoded image should have width > 0");
+        assert!(graphic.height > 0, "Decoded image should have height > 0");
+
+        // State should be cleaned up
+        assert!(
+            !state.chunk_accumulators.contains_key(&42),
+            "Accumulator should be removed after final chunk"
+        );
+    }
+
+    #[test]
+    fn test_chunk_accumulation_multiple_images() {
+        // Test that chunks for different image IDs are tracked separately
+        let png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+        let split_point = png_base64.len() / 2;
+        let chunk1 = &png_base64[..split_point];
+        let chunk2 = &png_base64[split_point..];
+
+        let mut state = KittyImageState::default();
+
+        // Start two different images
+        let apc_img1_chunk1 = format!("Gf=100,i=100,m=1;{}", chunk1);
+        let apc_img2_chunk1 = format!("Gf=100,i=200,m=1;{}", chunk1);
+
+        parse(&[apc_img1_chunk1.as_bytes()], &mut state);
+        parse(&[apc_img2_chunk1.as_bytes()], &mut state);
+
+        assert!(state.chunk_accumulators.contains_key(&100));
+        assert!(state.chunk_accumulators.contains_key(&200));
+
+        // Complete image 200 first
+        let apc_img2_chunk2 = format!("Gf=100,i=200,m=0;{}", chunk2);
+        let result = parse(&[apc_img2_chunk2.as_bytes()], &mut state);
+        assert!(result.is_some(), "Image 200 should complete");
+        assert!(
+            !state.chunk_accumulators.contains_key(&200),
+            "Image 200 accumulator should be removed"
+        );
+        assert!(
+            state.chunk_accumulators.contains_key(&100),
+            "Image 100 should still be accumulating"
+        );
+
+        // Complete image 100
+        let apc_img1_chunk2 = format!("Gf=100,i=100,m=0;{}", chunk2);
+        let result = parse(&[apc_img1_chunk2.as_bytes()], &mut state);
+        assert!(result.is_some(), "Image 100 should complete");
+        assert!(
+            !state.chunk_accumulators.contains_key(&100),
+            "Image 100 accumulator should be removed"
+        );
+    }
 }
 
 /// Handle Kitty graphics protocol queries
@@ -1079,6 +1221,13 @@ pub fn handle_query(params: &[&[u8]], terminator: &str) -> Option<String> {
                     tracing::debug!("Found image_id: {}", id);
                 }
             }
+            // Handle case where i= is prefixed with G (like "Gi=1")
+            if let Some(i) = part.strip_prefix("Gi=") {
+                if let Ok(id) = i.parse::<u32>() {
+                    image_id = id;
+                    tracing::debug!("Found image_id from Gi=: {}", id);
+                }
+            }
         }
     }
 
@@ -1099,7 +1248,7 @@ pub fn handle_query(params: &[&[u8]], terminator: &str) -> Option<String> {
     // Use the same terminator as the original query (BEL or ST)
     let response = format!("\x1b_Gi={},a=v,q={};OK{}", image_id, query_id, terminator);
 
-    tracing::debug!("Query response: {}", response);
+    tracing::info!("Query response: {}", response);
 
     Some(response)
 }
@@ -1113,6 +1262,8 @@ pub struct KittyImageState {
     placements: HashMap<(u32, u32), ()>,
 
     used_memory: usize,
+
+    pub chunk_accumulators: HashMap<u32, String>,
 }
 
 impl KittyImageState {
@@ -1237,7 +1388,7 @@ where
     Ok(())
 }
 
-pub fn parse(params: &[&[u8]]) -> Option<GraphicData> {
+pub fn parse(params: &[&[u8]], state: &mut KittyImageState) -> Option<GraphicData> {
     if params.is_empty() {
         return None;
     }
@@ -1259,11 +1410,46 @@ pub fn parse(params: &[&[u8]]) -> Option<GraphicData> {
             // Process image data transmission
             match transmit.data {
                 KittyImageData::Direct(base64_data) => {
+                    let image_id = transmit.image_id.unwrap_or(0);
+
+                    if transmit.more_data_follows {
+                        tracing::info!(
+                            "Received Kitty image chunk for id={}, len={}, more follows",
+                            image_id,
+                            base64_data.len()
+                        );
+                        state
+                            .chunk_accumulators
+                            .entry(image_id)
+                            .or_default()
+                            .push_str(&base64_data);
+                        return None;
+                    }
+
+                    let final_data = if let Some(mut accumulated) =
+                        state.chunk_accumulators.remove(&image_id)
+                    {
+                        tracing::info!(
+                            "Received final Kitty image chunk for id={}, len={}, total accumulated len={}",
+                            image_id,
+                            base64_data.len(),
+                            accumulated.len() + base64_data.len()
+                        );
+                        accumulated.push_str(&base64_data);
+                        accumulated
+                    } else {
+                        base64_data
+                    };
+
                     // Decode base64 data
                     let decoded = Base64
-                        .decode(base64_data.as_bytes())
+                        .decode(final_data.as_bytes())
                         .map_err(|e| {
-                            tracing::info!("Failed to decode base64: {:?}", e);
+                            tracing::info!(
+                                "Failed to decode base64 (len={}): {:?}",
+                                final_data.len(),
+                                e
+                            );
                             KittyGraphicsError::Parse(format!(
                                 "Failed to decode base64: {:?}",
                                 e
@@ -1271,10 +1457,19 @@ pub fn parse(params: &[&[u8]]) -> Option<GraphicData> {
                         })
                         .ok()?;
 
+                    tracing::info!(
+                        "Successfully decoded Kitty image base64, size={} bytes",
+                        decoded.len()
+                    );
+
                     // Load image from memory
                     let dynamic_image = image_rs::load_from_memory(&decoded)
                         .map_err(|e| {
-                            tracing::info!("Failed to load image from memory: {:?}", e);
+                            tracing::info!(
+                                "Failed to load image from memory (size={}): {:?}",
+                                decoded.len(),
+                                e
+                            );
                             KittyGraphicsError::Image(format!(
                                 "Failed to load image from memory: {:?}",
                                 e

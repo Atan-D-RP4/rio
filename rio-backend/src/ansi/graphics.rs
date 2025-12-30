@@ -2,6 +2,7 @@
 // Alacritty is licensed under Apache 2.0 license.
 // https://github.com/alacritty/alacritty/pull/4763/files
 
+use crate::ansi::kitty_graphics_protocol;
 use crate::ansi::sixel;
 use crate::config::colors::ColorRgb;
 use crate::crosswords::grid::Dimensions;
@@ -116,6 +117,8 @@ pub struct Graphics {
 
     /// Current Sixel parser.
     pub sixel_parser: Option<Box<sixel::Parser>>,
+
+    pub kitty_state: kitty_graphics_protocol::KittyImageState,
 }
 
 impl Graphics {

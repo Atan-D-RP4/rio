@@ -401,6 +401,9 @@ pub trait Handler {
 
     /// Handle APC (Application Program Command) response.
     fn apc_response(&mut self, _response: String) {}
+
+    /// Get Kitty graphics state.
+    fn kitty_graphics_state(&mut self) -> &mut kitty_graphics_protocol::KittyImageState;
 }
 
 pub trait Timeout: Default {
@@ -773,67 +776,66 @@ impl<U: Handler, T: Timeout> copa::Perform for Performer<'_, U, T> {
             return;
         }
 
-        match params[0] {
-            b"G" => {
-                tracing::info!("[apc_dispatch] Matched Kitty graphics protocol 'G'");
+        if params[0].starts_with(b"G") {
+            tracing::info!("[apc_dispatch] Matched Kitty graphics protocol 'G'");
 
-                // Handle queries and send responses first
-                // Pass correct terminator to use in response
-                if let Some(response) =
-                    kitty_graphics_protocol::handle_query(params, terminator)
-                {
-                    tracing::info!(
-                        "[apc_dispatch] Sending graphics query response: {:?}",
-                        response
-                    );
-                    self.handler.apc_response(response);
-                }
-
-                // Handle Kitty graphics protocol
-                // For Kitty graphics, copa splits parameters on semicolons, but Kitty uses
-                // semicolons for payload separation. We need to reconstruct the full APC data.
-                let full_apc_data = if params.len() == 1 {
-                    // Single parameter case - should be just "G" but copa processing gives us more
-                    params[0].to_vec()
-                } else {
-                    // Multiple parameters - reconstruct by joining all params with semicolons
-                    // The first param should start with 'G' after copa processing
-                    let mut reconstructed = Vec::new();
-                    for (i, param) in params.iter().enumerate() {
-                        if i > 0 {
-                            reconstructed.extend_from_slice(b";");
-                        }
-                        reconstructed.extend_from_slice(param);
+            // Handle queries and send responses first
+            // Pass correct terminator to use in response
+            // Handle Kitty graphics protocol
+            // For Kitty graphics, we use the full APC data directly
+            let full_apc_data = if params.len() == 1 {
+                params[0].to_vec()
+            } else {
+                // Multiple parameters - reconstruct by joining all params with semicolons
+                // This shouldn't happen with the new copa parser, but keeping it for robustness
+                let mut reconstructed = Vec::new();
+                for (i, param) in params.iter().enumerate() {
+                    if i > 0 {
+                        reconstructed.extend_from_slice(b";");
                     }
-                    let apc_str = String::from_utf8_lossy(&reconstructed);
-                    let truncated = if apc_str.len() > 50 {
-                        format!("{}...({} chars)", &apc_str[..50], apc_str.len())
-                    } else {
-                        apc_str.to_string()
-                    };
-                    tracing::debug!(
-                        "[apc_dispatch] Reconstructed APC data: {}",
-                        truncated
-                    );
-                    reconstructed
-                };
-
-                let single_param = [full_apc_data.as_slice()];
-                if let Some(graphic_data) = kitty_graphics_protocol::parse(&single_param)
-                {
-                    tracing::info!(
-                        "[apc_dispatch] Received graphic data: {:?}",
-                        graphic_data.id
-                    );
-                    self.handler.insert_graphic(graphic_data, None);
+                    reconstructed.extend_from_slice(param);
                 }
-            }
-            _ => {
-                tracing::warn!(
-                    "[apc_dispatch] Unrecognized APC command: {:?}",
-                    String::from_utf8_lossy(params[0])
+                reconstructed
+            };
+
+            // Check for queries first (strip 'G' prefix for query parsing)
+            let query_data = if !full_apc_data.is_empty() && full_apc_data[0] == b'G' {
+                &full_apc_data[1..]
+            } else {
+                &full_apc_data
+            };
+
+            let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
+            if let Some(response) =
+                kitty_graphics_protocol::handle_query(&[query_data], terminator)
+            {
+                tracing::info!(
+                    "[apc_dispatch] Sending graphics query response: {:?}",
+                    response
                 );
-                unhandled(params);
+                self.handler.apc_response(response);
+                return;
+            }
+
+            let state = self.handler.kitty_graphics_state();
+            if let Some(graphic_data) =
+                kitty_graphics_protocol::parse(&[full_apc_data.as_slice()], state)
+            {
+                tracing::info!(
+                    "[apc_dispatch] Received graphic data: {:?}",
+                    graphic_data.id
+                );
+                self.handler.insert_graphic(graphic_data, None);
+            }
+        } else {
+            match params[0] {
+                _ => {
+                    tracing::warn!(
+                        "[apc_dispatch] Unrecognized APC command: {:?}",
+                        String::from_utf8_lossy(params[0])
+                    );
+                    unhandled(params);
+                }
             }
         }
     }
@@ -1859,6 +1861,35 @@ fn get_termcap_capability(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ansi::kitty_graphics_protocol::KittyImageState;
+
+    #[derive(Default)]
+    struct MockHandler {
+        last_apc_response: Option<String>,
+        insert_graphic_called: bool,
+        kitty_state: KittyImageState,
+    }
+
+    impl MockHandler {
+        fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl Handler for MockHandler {
+        fn apc_response(&mut self, response: String) {
+            self.last_apc_response = Some(response);
+        }
+
+        fn insert_graphic(&mut self, data: GraphicData, _palette: Option<Vec<ColorRgb>>) {
+            let _ = data;
+            self.insert_graphic_called = true;
+        }
+
+        fn kitty_graphics_state(&mut self) -> &mut KittyImageState {
+            &mut self.kitty_state
+        }
+    }
 
     #[test]
     fn test_hex_encoding() {
@@ -1913,6 +1944,20 @@ mod tests {
         // Test invalid capability
         let response = process_xtgettcap_request(b"5858"); // "XX"
         assert_eq!(response, "\x1bP0+r\x1b\\");
+    }
+
+    #[test]
+    fn test_processor_apc_response_integration() {
+        let mut processor = Processor::new();
+        let mut mock_handler = MockHandler::default();
+
+        let query_bytes = b"\x1b_Gi=1,a=q,q=1\x07";
+        processor.advance(&mut mock_handler, query_bytes);
+
+        assert_eq!(
+            mock_handler.last_apc_response,
+            Some("\x1b_Gi=1,a=v,q=1;OK\x07".to_string())
+        );
     }
 
     #[test]
